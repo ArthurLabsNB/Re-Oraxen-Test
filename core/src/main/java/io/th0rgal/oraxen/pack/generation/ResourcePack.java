@@ -15,6 +15,7 @@ import io.th0rgal.oraxen.items.ItemBuilder;
 import io.th0rgal.oraxen.items.OraxenMeta;
 import io.th0rgal.oraxen.pack.upload.UploadManager;
 import io.th0rgal.oraxen.sound.CustomSound;
+import io.th0rgal.oraxen.sound.JukeboxDatapack;
 import io.th0rgal.oraxen.sound.SoundManager;
 import io.th0rgal.oraxen.utils.*;
 import io.th0rgal.oraxen.utils.customarmor.ComponentArmorModels;
@@ -88,7 +89,15 @@ public class ResourcePack {
         extractInPackIfNotExists(new File(packFolder, "pack.png"));
 
         // Sorting items to keep only one with models (and generate it if needed)
-        generatePredicates(extractTexturedItems());
+        final Map<Material, Map<String, ItemBuilder>> texturedItems = extractTexturedItems();
+
+        // after 1.21.4, a model definition is created for each textured item
+        if (VersionUtil.atOrAbove("1.21.4")) {
+            generateModelDefinitions(texturedItems);
+        } else {
+            generatePredicates(texturedItems);
+        }
+
         generateFont();
         if (Settings.HIDE_SCOREBOARD_NUMBERS.toBool())
             hideScoreboardNumbers();
@@ -276,9 +285,9 @@ public class ResourcePack {
 
         if (!malformedTextures.isEmpty() || !malformedModels.isEmpty()) {
             Logs.logError("Pack contains malformed texture(s) and/or model(s)");
-            Logs.logError("These need to be fixed, otherwise the resourcepack will be broken", true);
+            Logs.logError("These need to be fixed, otherwise the resourcepack will be broken");
         } else
-            Logs.logSuccess("No broken models or textures were found in the resourcepack", true);
+            Logs.logSuccess("No broken models or textures were found in the resourcepack");
 
         Set<String> malformedFiles = malformedTextures.stream().map(VirtualFile::getPath).collect(Collectors.toSet());
         malformedFiles.addAll(malformedModels.stream().map(VirtualFile::getPath).collect(Collectors.toSet()));
@@ -357,40 +366,48 @@ public class ResourcePack {
         resourcesManager.extractFileIfTrue(entry, isSuitable);
     }
 
-    private Map<Material, List<ItemBuilder>> extractTexturedItems() {
-        final Map<Material, List<ItemBuilder>> texturedItems = new HashMap<>();
+    private Map<Material, Map<String, ItemBuilder>> extractTexturedItems() {
+        final Map<Material, Map<String, ItemBuilder>> texturedItems = new HashMap<>();
         for (final Map.Entry<String, ItemBuilder> entry : OraxenItems.getEntries()) {
+            final String itemId = entry.getKey();
             final ItemBuilder item = entry.getValue();
             OraxenMeta oraxenMeta = item.getOraxenMeta();
             if (item.hasOraxenMeta() && oraxenMeta.hasPackInfos()) {
                 String modelName = oraxenMeta.getModelName() + ".json";
                 String modelPath = oraxenMeta.getModelPath();
-                // if (item.hasEquippableComponent() && item.getEquippableComponent().getModel()
-                // != null)
-                // modelPath += "/item/";
                 if (oraxenMeta.shouldGenerateModel()) {
                     writeStringToVirtual(modelPath, modelName, new ModelGenerator(oraxenMeta).getJson().toString());
                 }
-                final List<ItemBuilder> items = texturedItems.getOrDefault(item.build().getType(), new ArrayList<>());
-                // todo: could be improved by using
-                // items.get(i).getOraxenMeta().getCustomModelData() when
-                // items.add(customModelData, item) with catch when not possible
-                if (items.isEmpty())
-                    items.add(item);
-                else
-                    // for some reason those breaks are needed to avoid some nasty "memory leak"
-                    for (int i = 0; i < items.size(); i++) {
-                        Integer cmd = Optional.ofNullable(items.get(i).getOraxenMeta().getCustomModelData()).orElse(0);
-                        Integer cmd2 = Optional.ofNullable(oraxenMeta.getCustomModelData()).orElse(0);
-                        if (cmd > cmd2) {
-                            items.add(i, item);
-                            break;
-                        } else if (i == items.size() - 1) {
-                            items.add(item);
-                            break;
-                        }
+                final Map<String, ItemBuilder> items = texturedItems.computeIfAbsent(item.build().getType(),
+                        k -> new LinkedHashMap<>());
+
+                // Insert in order of CustomModelData
+                List<Map.Entry<String, ItemBuilder>> sortedItems = new ArrayList<>(items.entrySet());
+                int insertIndex = 0;
+                Integer newCmd = Optional.ofNullable(oraxenMeta.getCustomModelData()).orElse(0);
+
+                for (Map.Entry<String, ItemBuilder> existingEntry : sortedItems) {
+                    Integer existingCmd = Optional
+                            .ofNullable(existingEntry.getValue().getOraxenMeta().getCustomModelData()).orElse(0);
+                    if (existingCmd > newCmd)
+                        break;
+                    insertIndex++;
+                }
+
+                // Rebuild map in correct order
+                Map<String, ItemBuilder> newItems = new LinkedHashMap<>();
+                for (int i = 0; i < sortedItems.size(); i++) {
+                    if (i == insertIndex) {
+                        newItems.put(itemId, item);
                     }
-                texturedItems.put(item.build().getType(), items);
+                    Map.Entry<String, ItemBuilder> existingEntry = sortedItems.get(i);
+                    newItems.put(existingEntry.getKey(), existingEntry.getValue());
+                }
+                if (insertIndex >= sortedItems.size()) {
+                    newItems.put(itemId, item);
+                }
+
+                texturedItems.put(item.build().getType(), newItems);
             }
         }
         return texturedItems;
@@ -425,15 +442,40 @@ public class ResourcePack {
                 folder.mkdirs();
     }
 
-    private void generatePredicates(final Map<Material, List<ItemBuilder>> texturedItems) {
-        for (final Map.Entry<Material, List<ItemBuilder>> texturedItemsEntry : texturedItems.entrySet()) {
+    private void generatePredicates(final Map<Material, Map<String, ItemBuilder>> texturedItems) {
+        for (final Map.Entry<Material, Map<String, ItemBuilder>> texturedItemsEntry : texturedItems.entrySet()) {
             final Material entryMaterial = texturedItemsEntry.getKey();
             final PredicatesGenerator predicatesGenerator = new PredicatesGenerator(entryMaterial,
-                    texturedItemsEntry.getValue());
+                    new ArrayList<>(texturedItemsEntry.getValue().values()));
             final String[] vanillaModelPath = (predicatesGenerator.getVanillaModelName(entryMaterial) + ".json")
                     .split("/");
             writeStringToVirtual("assets/minecraft/models/" + vanillaModelPath[0], vanillaModelPath[1],
                     predicatesGenerator.toJSON().toString());
+        }
+    }
+
+    private static boolean needsTinting(Material material) {
+        return material.name().startsWith("LEATHER_")
+                || material == Material.POTION
+                || material == Material.SPLASH_POTION
+                || material == Material.LINGERING_POTION;
+    }
+
+    private void generateModelDefinitions(final Map<Material, Map<String, ItemBuilder>> texturedItems) {
+        for (final Map.Entry<Material, Map<String, ItemBuilder>> materialEntry : texturedItems.entrySet()) {
+            for (final Map.Entry<String, ItemBuilder> entry : materialEntry.getValue().entrySet()) {
+                Material key = materialEntry.getKey();
+
+                String itemId = entry.getKey();
+                ItemBuilder texturedItem = entry.getValue();
+                OraxenMeta oraxenMeta = texturedItem.getOraxenMeta();
+                if (oraxenMeta.hasPackInfos()) {
+                    final ModelDefinitionGenerator modelDefinitionGenerator = new ModelDefinitionGenerator(oraxenMeta,
+                            key);
+                    writeStringToVirtual("assets/oraxen/items/", itemId + ".json",
+                            modelDefinitionGenerator.toJSON().toString());
+                }
+            }
         }
     }
 
@@ -486,7 +528,10 @@ public class ResourcePack {
             output.remove(soundFile);
         }
 
-        for (CustomSound sound : handleCustomSoundEntries(soundManager.getCustomSounds())) {
+        Collection<CustomSound> customSounds = handleCustomSoundEntries(soundManager.getCustomSounds());
+
+        // Add all sounds to the sounds.json
+        for (CustomSound sound : customSounds) {
             outputJson.add(sound.getName(), sound.toJson());
         }
 
@@ -496,6 +541,16 @@ public class ResourcePack {
             soundInput.close();
         } catch (IOException e) {
             e.printStackTrace();
+        }
+
+        // Initialize JukeboxDatapack with jukebox sounds after processing all sounds
+        Collection<CustomSound> jukeboxSounds = customSounds.stream()
+                .filter(CustomSound::isJukeboxSound)
+                .toList();
+        if (!jukeboxSounds.isEmpty()) {
+            JukeboxDatapack jukeboxDatapack = new JukeboxDatapack(jukeboxSounds);
+            jukeboxDatapack.clearOldDataPack();
+            jukeboxDatapack.generateAssets(output);
         }
     }
 
@@ -507,36 +562,61 @@ public class ResourcePack {
         ConfigurationSection furniture = mechanic.getConfigurationSection("furniture");
         ConfigurationSection block = mechanic.getConfigurationSection("block");
 
-        if (customSounds == null) {
-            sounds.removeIf(s -> s.getName().startsWith("required.wood") || s.getName().startsWith("block.wood"));
-            sounds.removeIf(s -> s.getName().startsWith("required.stone") || s.getName().startsWith("block.stone"));
-        } else {
-            if (!customSounds.getBoolean("noteblock_and_block", true)) {
-                sounds.removeIf(s -> s.getName().startsWith("required.wood") || s.getName().startsWith("block.wood"));
-            }
-            if (!customSounds.getBoolean("stringblock_and_furniture", true)) {
-                sounds.removeIf(s -> s.getName().startsWith("required.stone") || s.getName().startsWith("block.stone"));
-            }
-            if ((noteblock != null && !noteblock.getBoolean("enabled", true) && block != null
-                    && !block.getBoolean("enabled", false))) {
-                sounds.removeIf(s -> s.getName().startsWith("required.wood") || s.getName().startsWith("block.wood"));
-            }
-            if (stringblock != null && !stringblock.getBoolean("enabled", true) && furniture != null
-                    && !furniture.getBoolean("enabled", true)) {
-                sounds.removeIf(s -> s.getName().startsWith("required.stone") || s.getName().startsWith("block.stone"));
-            }
-        }
+        handleWoodSoundEntries(sounds, customSounds, noteblock, block);
+        handleStoneSoundEntries(sounds, customSounds, stringblock, furniture);
 
         // Clear the sounds.json file of yaml configuration entries that should not be
         // there
+        removeUnwantedSoundEntries(sounds);
+
+        return sounds;
+    }
+
+    private void handleWoodSoundEntries(Collection<CustomSound> sounds,
+            ConfigurationSection customSounds,
+            ConfigurationSection noteblock,
+            ConfigurationSection block) {
+        if (customSounds == null) {
+            sounds.removeIf(s -> s.getName().startsWith("required.wood") || s.getName().startsWith("block.wood"));
+            return;
+        }
+
+        if (!customSounds.getBoolean("noteblock_and_block", true)) {
+            sounds.removeIf(s -> s.getName().startsWith("required.wood") || s.getName().startsWith("block.wood"));
+        }
+
+        if (noteblock != null && !noteblock.getBoolean("enabled", true) &&
+                block != null && !block.getBoolean("enabled", false)) {
+            sounds.removeIf(s -> s.getName().startsWith("required.wood") || s.getName().startsWith("block.wood"));
+        }
+    }
+
+    private void handleStoneSoundEntries(Collection<CustomSound> sounds,
+            ConfigurationSection customSounds,
+            ConfigurationSection stringblock,
+            ConfigurationSection furniture) {
+        if (customSounds == null) {
+            sounds.removeIf(s -> s.getName().startsWith("required.stone") || s.getName().startsWith("block.stone"));
+            return;
+        }
+
+        if (!customSounds.getBoolean("stringblock_and_furniture", true)) {
+            sounds.removeIf(s -> s.getName().startsWith("required.stone") || s.getName().startsWith("block.stone"));
+        }
+
+        if (stringblock != null && !stringblock.getBoolean("enabled", true) &&
+                furniture != null && !furniture.getBoolean("enabled", true)) {
+            sounds.removeIf(s -> s.getName().startsWith("required.stone") || s.getName().startsWith("block.stone"));
+        }
+    }
+
+    private void removeUnwantedSoundEntries(Collection<CustomSound> sounds) {
         sounds.removeIf(s -> s.getName().equals("required") ||
                 s.getName().equals("block") ||
                 s.getName().equals("block.wood") ||
                 s.getName().equals("block.stone") ||
                 s.getName().equals("required.wood") ||
                 s.getName().equals("required.stone"));
-
-        return sounds;
     }
 
     public static void writeStringToVirtual(String folder, String name, String content) {
@@ -625,16 +705,18 @@ public class ResourcePack {
 
     private void handleCustomArmor(List<VirtualFile> output) {
         CustomArmorType customArmorType = CustomArmorType.getSetting();
-        // Clear out old datapacks before generating new ones, in case type changed or
-        // otherwise
-        TrimArmorDatapack.clearOldDataPacks();
 
         switch (customArmorType) {
             case COMPONENT -> componentArmorModels.generatePackFiles(output);
-            case TRIMS -> trimArmorDatapack.generateTrimAssets(output);
+            case TRIMS -> {
+                if (trimArmorDatapack == null)
+                    trimArmorDatapack = new TrimArmorDatapack();
+                trimArmorDatapack.clearOldDataPack();
+                trimArmorDatapack.generateAssets(output);
+            }
             case SHADER -> {
                 if (Settings.CUSTOM_ARMOR_SHADER_GENERATE_CUSTOM_TEXTURES.toBool()
-                        && shaderArmorTextures.hasCustomArmors())
+                        && shaderArmorTextures.hasCustomArmors()) {
                     try {
                         String armorPath = "assets/minecraft/textures/models/armor";
                         output.add(
@@ -647,12 +729,10 @@ public class ResourcePack {
                     } catch (IOException e) {
                         e.printStackTrace();
                     }
+                }
             }
-        }
-        if (VersionUtil.isPaperServer()) {
-            Bukkit.getDatapackManager().getPacks().stream()
-                    .filter(d -> d.getName().equals(TrimArmorDatapack.datapackKey.value()))
-                    .findFirst().ifPresent(d -> d.setEnabled(CustomArmorType.getSetting() == CustomArmorType.TRIMS));
+            default -> {
+            } // Handle NONE
         }
     }
 

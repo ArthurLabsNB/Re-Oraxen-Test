@@ -1,7 +1,11 @@
 package io.th0rgal.oraxen.commands;
 
 import dev.jorel.commandapi.CommandAPICommand;
-import dev.jorel.commandapi.arguments.*;
+import dev.jorel.commandapi.arguments.ArgumentSuggestions;
+import dev.jorel.commandapi.arguments.EntitySelectorArgument;
+import dev.jorel.commandapi.arguments.GreedyStringArgument;
+import dev.jorel.commandapi.arguments.IntegerArgument;
+import dev.jorel.commandapi.arguments.TextArgument;
 import io.th0rgal.oraxen.OraxenPlugin;
 import io.th0rgal.oraxen.api.OraxenItems;
 import io.th0rgal.oraxen.config.Message;
@@ -13,6 +17,8 @@ import org.bukkit.Color;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
+import com.comphenix.protocol.error.Report;
+
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
@@ -23,12 +29,14 @@ public class CommandsManager {
         new CommandAPICommand("oraxen")
                 .withAliases("o", "oxn")
                 .withPermission("oraxen.command")
-                .withSubcommands(getDyeCommand(), getInvCommand(), getSimpleGiveCommand(), getGiveCommand(), getTakeCommand(),
+                .withSubcommands(getDyeCommand(), getInvCommand(), getSimpleGiveCommand(), getGiveCommand(),
+                        getTakeCommand(),
                         (new PackCommand()).getPackCommand(),
                         (new UpdateCommand()).getUpdateCommand(),
                         (new RepairCommand()).getRepairCommand(),
                         (new RecipesCommand()).getRecipesCommand(),
                         (new ReloadCommand()).getReloadCommand(),
+                        (new ReportCommand()).getReportCommand(),
                         (new DebugCommand()).getDebugCommand(),
                         (new ModelDataCommand()).getHighestModelDataCommand(),
                         (new GlyphCommand()).getGlyphCommand(),
@@ -45,7 +53,7 @@ public class CommandsManager {
                 .register();
     }
 
-    private Color hex2Rgb(String colorStr) throws NumberFormatException {
+    private Color hex2Rgb(final String colorStr) throws NumberFormatException {
         return Color.fromRGB(
                 Integer.valueOf(colorStr.substring(1, 3), 16),
                 Integer.valueOf(colorStr.substring(3, 5), 16),
@@ -57,11 +65,11 @@ public class CommandsManager {
                 .withPermission("oraxen.command.dye")
                 .withArguments(new GreedyStringArgument("color"))
                 .executes((sender, args) -> {
-                    if (sender instanceof Player player) {
-                        Color hexColor;
+                    if (sender instanceof final Player player) {
+                        final Color hexColor;
                         try {
                             hexColor = hex2Rgb((String) args.get("color"));
-                        } catch (StringIndexOutOfBoundsException | NumberFormatException e) {
+                        } catch (final StringIndexOutOfBoundsException | NumberFormatException e) {
                             Message.DYE_WRONG_COLOR.send(sender);
                             return;
                         }
@@ -77,9 +85,10 @@ public class CommandsManager {
                 .withAliases("inv")
                 .withPermission("oraxen.command.inventory.view")
                 .executes((sender, args) -> {
-                    if (sender instanceof Player player)
+                    if (sender instanceof final Player player)
                         OraxenPlugin.get().getInvManager().getItemsView(player).open(player);
-                    else Message.NOT_PLAYER.send(sender);
+                    else
+                        Message.NOT_PLAYER.send(sender);
                 });
     }
 
@@ -100,19 +109,23 @@ public class CommandsManager {
                         return;
                     }
                     int amount = (int) args.get(2);
-                    final int max = itemBuilder.hasMaxStackSize() ? itemBuilder.getMaxStackSize() : itemBuilder.getType().getMaxStackSize();
+                    final int max = itemBuilder.hasMaxStackSize() ? itemBuilder.getMaxStackSize()
+                            : itemBuilder.getType().getMaxStackSize();
                     final int slots = amount / max + (max % amount > 0 ? 1 : 0);
-                    ItemStack[] items = itemBuilder.buildArray(slots > 36 ? (amount = max * 36) : amount);
+                    final ItemStack[] items = itemBuilder.buildArray(slots > 36 ? (amount = max * 36) : amount);
 
                     for (final Player target : targets) {
-                        Map<Integer, ItemStack> output = target.getInventory().addItem(items);
-                        for (ItemStack stack : output.values())
-                            target.getWorld().dropItem(target.getLocation(), stack);
+                        final Map<Integer, ItemStack> output = target.getInventory().addItem(items);
+                        if (!output.isEmpty()) {
+                            for (final ItemStack stack : output.values())
+                                target.getWorld().dropItem(target.getLocation(), stack);
+                        }
                     }
 
                     if (targets.size() == 1)
                         Message.GIVE_PLAYER
-                                .send(sender, AdventureUtils.tagResolver("player", (targets.iterator().next().getName())),
+                                .send(sender,
+                                        AdventureUtils.tagResolver("player", (targets.iterator().next().getName())),
                                         AdventureUtils.tagResolver("amount", (String.valueOf(amount))),
                                         AdventureUtils.tagResolver("item", itemID));
                     else
@@ -138,8 +151,16 @@ public class CommandsManager {
                         Message.ITEM_NOT_FOUND.send(sender, AdventureUtils.tagResolver("item", itemID));
                         return;
                     }
-                    for (final Player target : targets)
-                        target.getInventory().addItem(ItemUpdater.updateItem(itemBuilder.build()));
+
+                    for (final Player target : targets) {
+                        final Map<Integer, ItemStack> output = target.getInventory()
+                                .addItem(ItemUpdater.updateItem(itemBuilder.build()));
+                        if (!output.isEmpty()) {
+                            for (final ItemStack stack : output.values()) {
+                                target.getWorld().dropItem(target.getLocation(), stack);
+                            }
+                        }
+                    }
 
                     if (targets.size() == 1)
                         Message.GIVE_PLAYER
@@ -159,43 +180,48 @@ public class CommandsManager {
                 .withPermission("oraxen.command.take")
                 .withArguments(
                         new EntitySelectorArgument.ManyPlayers("targets"),
-                        new TextArgument("item").replaceSuggestions(ArgumentSuggestions.strings(OraxenItems.getItemNames())),
-                        new IntegerArgument("amount").setOptional(true)
-                )
+                        new TextArgument("item")
+                                .replaceSuggestions(ArgumentSuggestions.strings(OraxenItems.getItemNames())),
+                        new IntegerArgument("amount").setOptional(true))
                 .executes((sender, args) -> {
                     final Collection<Player> targets = (Collection<Player>) args.get("targets");
                     final String itemID = (String) args.getOrDefault("item", "");
                     final Optional<Integer> amount = args.getOptionalByClass("amount", Integer.class);
                     if (!OraxenItems.exists(itemID)) {
                         Message.ITEM_NOT_FOUND.send(sender, AdventureUtils.tagResolver("item", itemID));
-                    } else for (final Player target : targets) {
-                        if (amount.isEmpty()) {
-                            for (ItemStack itemStack : target.getInventory().getContents())
-                                if (!ItemUtils.isEmpty(itemStack) && itemID.equals(OraxenItems.getIdByItem(itemStack)))
-                                    target.getInventory().remove(itemStack);
-                        } else {
-                            int toRemove = amount.get();
-                            while (toRemove > 0) {
-                                ItemStack[] items = target.getInventory().getStorageContents();
-                                for (int i = 0; i < items.length; i++) {
-                                    ItemStack itemStack = items[i];
-                                    if (!ItemUtils.isEmpty(itemStack) && itemID.equals(OraxenItems.getIdByItem(itemStack))) {
-                                        if (itemStack.getAmount() <= toRemove) {
-                                            toRemove -= itemStack.getAmount();
-                                            target.getInventory().clear(i);
-                                        } else {
-                                            itemStack.setAmount(itemStack.getAmount() - toRemove);
-                                            toRemove = 0;
+                    } else
+                        for (final Player target : targets) {
+                            if (amount.isEmpty()) {
+                                for (final ItemStack itemStack : target.getInventory().getContents())
+                                    if (!ItemUtils.isEmpty(itemStack)
+                                            && itemID.equals(OraxenItems.getIdByItem(itemStack)))
+                                        target.getInventory().remove(itemStack);
+                            } else {
+                                int toRemove = amount.get();
+                                while (toRemove > 0) {
+                                    final ItemStack[] items = target.getInventory().getStorageContents();
+                                    for (int i = 0; i < items.length; i++) {
+                                        final ItemStack itemStack = items[i];
+                                        if (!ItemUtils.isEmpty(itemStack)
+                                                && itemID.equals(OraxenItems.getIdByItem(itemStack))) {
+                                            if (itemStack.getAmount() <= toRemove) {
+                                                toRemove -= itemStack.getAmount();
+                                                target.getInventory().clear(i);
+                                            } else {
+                                                itemStack.setAmount(itemStack.getAmount() - toRemove);
+                                                toRemove = 0;
+                                            }
+
+                                            if (toRemove == 0)
+                                                break;
                                         }
-
-                                        if (toRemove == 0) break;
                                     }
-                                }
 
-                                if (toRemove > 0) break;
+                                    if (toRemove > 0)
+                                        break;
+                                }
                             }
                         }
-                    }
                 });
     }
 }

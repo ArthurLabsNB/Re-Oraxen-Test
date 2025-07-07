@@ -4,11 +4,13 @@ import io.th0rgal.oraxen.OraxenPlugin;
 import io.th0rgal.oraxen.compatibilities.provided.ecoitems.WrappedEcoItem;
 import io.th0rgal.oraxen.compatibilities.provided.mythiccrucible.WrappedCrucibleItem;
 import io.th0rgal.oraxen.config.Message;
+import io.th0rgal.oraxen.config.Settings;
 import io.th0rgal.oraxen.items.ItemBuilder;
 import io.th0rgal.oraxen.items.ItemParser;
 import io.th0rgal.oraxen.items.ModelData;
 import io.th0rgal.oraxen.mechanics.MechanicFactory;
 import io.th0rgal.oraxen.mechanics.MechanicsManager;
+import io.th0rgal.oraxen.nms.NMSHandlers;
 import io.th0rgal.oraxen.pack.generation.DuplicationHandler;
 import io.th0rgal.oraxen.utils.AdventureUtils;
 import io.th0rgal.oraxen.utils.OraxenYaml;
@@ -16,11 +18,13 @@ import io.th0rgal.oraxen.utils.VersionUtil;
 import io.th0rgal.oraxen.utils.logs.Logs;
 import net.Indyuce.mmoitems.MMOItems;
 import org.apache.commons.lang3.math.NumberUtils;
+import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.components.FoodComponent;
+import org.bukkit.inventory.meta.components.JukeboxPlayableComponent;
 import org.bukkit.persistence.PersistentDataType;
 
 import javax.annotation.Nullable;
@@ -37,17 +41,55 @@ public class OraxenItems {
     private static Set<String> items;
 
     public static void loadItems() {
-        ItemParser.MODEL_DATAS_BY_ID.clear();
-        ModelData.DATAS.clear();
-        OraxenPlugin.get().getConfigsManager().assignAllUsedModelDatas();
-        OraxenPlugin.get().getConfigsManager().parseAllItemTemplates();
-        DuplicationHandler.convertOldMigrateItemConfig();
-        map = OraxenPlugin.get().getConfigsManager().parseItemConfig();
-        items = new HashSet<>();
-        for (final Map<String, ItemBuilder> subMap : map.values())
-            items.addAll(subMap.keySet());
+        try {
+            ItemParser.MODEL_DATAS_BY_ID.clear();
+            ModelData.DATAS.clear();
+            OraxenPlugin.get().getConfigsManager().assignAllUsedModelDatas();
+            OraxenPlugin.get().getConfigsManager().parseAllItemTemplates();
+            DuplicationHandler.convertOldMigrateItemConfig();
 
-        ensureComponentDataHandled();
+            // Test the environment for common compatibility issues before proceeding
+            if (Settings.DEBUG.toBool()) {
+                Logs.logInfo("Testing server compatibility before loading items...");
+                Logs.logInfo("  Running on Paper: " + VersionUtil.isPaperServer());
+                Logs.logInfo("  Minecraft version: " + Bukkit.getBukkitVersion());
+
+                // Check if JukeboxPlayableComponent is available
+                try {
+                    if (VersionUtil.atOrAbove("1.21")) {
+                        JukeboxPlayableComponent component = new ItemStack(Material.MUSIC_DISC_CREATOR).getItemMeta()
+                                .getJukeboxPlayable();
+                        component.setShowInTooltip(true); // This will throw on incompatible servers
+                        Logs.logInfo("  JukeboxPlayableComponent: Available");
+                    } else {
+                        Logs.logInfo("  JukeboxPlayableComponent: Not available (MC < 1.21)");
+                    }
+                } catch (NoSuchMethodError | NoClassDefFoundError e) {
+                    Logs.logWarning("  JukeboxPlayableComponent: Not available (Missing method or class)");
+                    Logs.logWarning("  Some features will be disabled: " + e.getMessage());
+                }
+
+                // Check if NMS handler is available
+                if (NMSHandlers.getHandler() == null) {
+                    Logs.logWarning("  NMS handler: Not available - some features won't work");
+                } else {
+                    Logs.logInfo("  NMS handler: Available (" + NMSHandlers.getVersion() + ")");
+                }
+            }
+
+            map = OraxenPlugin.get().getConfigsManager().parseItemConfig();
+            items = new HashSet<>();
+            for (final Map<String, ItemBuilder> subMap : map.values())
+                items.addAll(subMap.keySet());
+
+            ensureComponentDataHandled();
+        } catch (Exception e) {
+            Logs.logError("Failed to load Oraxen items!");
+            Logs.logError("Error: " + e.getMessage());
+            if (Settings.DEBUG.toBool()) {
+                e.printStackTrace();
+            }
+        }
     }
 
     /**
@@ -55,45 +97,53 @@ public class OraxenItems {
      * For example FoodComponent#getUsingConvertsTo
      */
     private static void ensureComponentDataHandled() {
-        if (VersionUtil.atOrAbove("1.21")) for (final Entry<File, Map<String, ItemBuilder>> entry : map.entrySet()) {
-            Map<String, ItemBuilder> subMap = entry.getValue();
-            for (final Entry<String, ItemBuilder> subEntry : subMap.entrySet()) {
-                String itemId = subEntry.getKey();
-                ItemBuilder itemBuilder = subEntry.getValue();
-                if (itemBuilder == null) continue;
-                FoodComponent foodComponent = itemBuilder.getFoodComponent();
-                if (foodComponent == null) continue;
+        if (VersionUtil.atOrAbove("1.21"))
+            for (final Entry<File, Map<String, ItemBuilder>> entry : map.entrySet()) {
+                Map<String, ItemBuilder> subMap = entry.getValue();
+                for (final Entry<String, ItemBuilder> subEntry : subMap.entrySet()) {
+                    String itemId = subEntry.getKey();
+                    ItemBuilder itemBuilder = subEntry.getValue();
+                    if (itemBuilder == null)
+                        continue;
+                    FoodComponent foodComponent = itemBuilder.getFoodComponent();
+                    if (foodComponent == null)
+                        continue;
 
-                ConfigurationSection section = OraxenYaml.loadConfiguration(entry.getKey()).getConfigurationSection(itemId + ".Components.food.replacement");
-                ItemStack replacementItem = parseFoodComponentReplacement(section);
-                //foodComponent.setUsingConvertsTo(replacementItem);
-                itemBuilder.setFoodComponent(foodComponent).regen();
+                    ConfigurationSection section = OraxenYaml.loadConfiguration(entry.getKey())
+                            .getConfigurationSection(itemId + ".Components.food.replacement");
+                    ItemStack replacementItem = parseFoodComponentReplacement(section);
+                    // foodComponent.setUsingConvertsTo(replacementItem);
+                    itemBuilder.setFoodComponent(foodComponent).regen();
+                }
             }
-        }
     }
 
     @Nullable
     private static ItemStack parseFoodComponentReplacement(@Nullable ConfigurationSection section) {
-        if (section == null) return null;
+        if (section == null)
+            return null;
 
         ItemStack replacementItem;
         if (section.isString("minecraft_type")) {
             Material material = Material.getMaterial(Objects.requireNonNull(section.getString("minecraft_type")));
             if (material == null) {
-                Logs.logError("Invalid material: " + section.getString("minecraft_type"));
+                Message.INVALID_MATERIAL.log(AdventureUtils.tagResolver("item", section.getString("minecraft_type")));
                 replacementItem = null;
-            } else replacementItem = new ItemStack(material);
+            } else
+                replacementItem = new ItemStack(material);
         } else if (section.isString("oraxen_item"))
             replacementItem = OraxenItems.getItemById(section.getString("oraxen_item")).build();
         else if (section.isString("crucible_item"))
             replacementItem = new WrappedCrucibleItem(section.getString("crucible_item")).build();
         else if (section.isString("mmoitems_id") && section.isString("mmoitems_type"))
-            replacementItem = MMOItems.plugin.getItem(section.getString("mmoitems_type"), section.getString("mmoitems_id"));
+            replacementItem = MMOItems.plugin.getItem(section.getString("mmoitems_type"),
+                    section.getString("mmoitems_id"));
         else if (section.isString("ecoitem_id"))
             replacementItem = new WrappedEcoItem(section.getString("ecoitem_id")).build();
         else if (section.isItemStack("minecraft_item"))
             replacementItem = section.getItemStack("minecraft_item");
-        else replacementItem = null;
+        else
+            replacementItem = null;
 
         return replacementItem;
     }
@@ -103,7 +153,8 @@ public class OraxenItems {
     }
 
     public static String getIdByItem(final ItemStack item) {
-        return (item == null || item.getItemMeta() == null || item.getItemMeta().getPersistentDataContainer().isEmpty()) ? null
+        return (item == null || item.getItemMeta() == null || item.getItemMeta().getPersistentDataContainer().isEmpty())
+                ? null
                 : item.getItemMeta().getPersistentDataContainer().get(ITEM_ID, PersistentDataType.STRING);
     }
 
@@ -138,12 +189,14 @@ public class OraxenItems {
 
     public static List<ItemStack> getItemStacksByName(final List<List<String>> lists) {
         return lists.stream().flatMap(list -> {
-            final ItemStack[] itemStack = new ItemStack[]{new ItemStack(Material.AIR)};
+            final ItemStack[] itemStack = new ItemStack[] { new ItemStack(Material.AIR) };
             list.stream().map(line -> line.split(":")).forEach(param -> {
                 switch (param[0].toLowerCase(Locale.ROOT)) {
                     case "type" -> {
-                        if (exists(param[1])) itemStack[0] = getItemById(param[1]).build().clone();
-                        else Message.ITEM_NOT_FOUND.log(AdventureUtils.tagResolver("item", param[1]));
+                        if (exists(param[1]))
+                            itemStack[0] = getItemById(param[1]).build().clone();
+                        else
+                            Message.ITEM_NOT_FOUND.log(AdventureUtils.tagResolver("item", param[1]));
                     }
                     case "amount" -> itemStack[0].setAmount(NumberUtils.toInt(param[1], 1));
                 }
